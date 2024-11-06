@@ -86,11 +86,11 @@ fn get_ascii(byte: u8) -> String {
     match byte {
         0 => "•".to_string(),
         9 => "⇥".to_string(),
-        10 => "↵".to_string(),
+        10 => "␊".to_string(),
         13 => "␍".to_string(),
         32 => "␣".to_string(),
         32..=126 => (byte as char).to_string(),
-        128..=255 => "✖".to_string(),
+        128..=255 => "×".to_string(),
         _ => "▴".to_string(),
     }
 }
