@@ -28,8 +28,20 @@ struct Args {
     #[clap(short = 'l', long, default_value = "16")]
     bytes_per_line: usize,
 
+    /// Skip the N first bytes of the file
+    #[clap(short, long, value_name = "N")]
+    skip: Option<usize>,
+
+    /// Only read N bytes from input
+    #[clap(short = 'n', long, value_name = "N")]
+    length: Option<usize>,
+
     /// Byte range to read (e.g., 0-1000 or 0xff-0x3e7)
-    #[clap(short = 'b', long, value_name = "RANGE")]
+    #[clap(
+        long,
+        value_name = "RANGE",
+        conflicts_with_all = ["skip", "length"],
+    )]
     byte_range: Option<ByteRange>,
 
     /// Reverse operation (hexdump to binary)
@@ -48,6 +60,20 @@ lazy_static! {
     static ref SPLIT_SYMBOL: String = match *USE_COLOR {
         true => RAW_SPLIT_SYMBOL.color(Color::BrightBlack).to_string(),
         false => RAW_SPLIT_SYMBOL.to_string(),
+    };
+    static ref START: usize = match ARGS.byte_range.clone() {
+        Some(range) => range.start,
+        None => match ARGS.skip {
+            Some(num) => num,
+            None => 0,
+        },
+    };
+    static ref MAX_COUNT: Option<usize> = match ARGS.byte_range.clone() {
+        Some(range) => Some(range.end - range.start),
+        None => match ARGS.length {
+            Some(num) => Some(num),
+            None => None,
+        },
     };
 }
 
@@ -89,11 +115,12 @@ fn hex_line(buff: &[u8], bytes_read: usize, use_color: bool) -> String {
         .take(bytes_read)
         .map(std::str::from_utf8)
         .enumerate()
-        .map(|(index, byte)| {
-            byte.unwrap()
+        .map(|(index, hex)| {
+            hex.unwrap()
                 .to_string()
-                .apply_if(use_color, |byte_string| {
-                    byte_string.color(get_color(buff[index])).to_string()
+                .apply_if(ARGS.uppercase, |hex_string| hex_string.to_uppercase())
+                .apply_if(use_color, |hex_string| {
+                    hex_string.color(get_color(buff[index])).to_string()
                 })
         })
         .collect::<Vec<_>>()
@@ -116,15 +143,15 @@ fn read_binary_file() -> io::Result<()> {
     let ifile_size = ifile.metadata()?.len();
 
     let trailing_zeroes = (ifile_size as f64).log(16.0).ceil() as usize;
-    let start_point = ARGS.byte_range.clone().unwrap_or_default().start as u64;
 
     let mut reader = BufReader::new(ifile);
-    reader.seek(io::SeekFrom::Start(start_point))?;
+    reader.seek(io::SeekFrom::Start(*START as u64))?;
 
     let buffer_size = ARGS.bytes_per_line;
     let mut buffer = vec![0u8; buffer_size];
 
-    let mut current_addr = start_point as usize;
+    let mut current_addr = *START;
+    let mut total_bytes_read = 0;
 
     let mut writer = match ARGS.output.clone() {
         Some(of_name) => Some(BufWriter::new(File::create_new(of_name)?)),
@@ -138,10 +165,18 @@ fn read_binary_file() -> io::Result<()> {
             // End of file
             break;
         }
-        if ARGS.byte_range.is_some() && current_addr > ARGS.byte_range.clone().unwrap().end {
+
+        if MAX_COUNT.is_some() && total_bytes_read >= MAX_COUNT.unwrap() {
             // Out of range
             break;
         }
+
+        let bytes_read =
+            if MAX_COUNT.is_some() && total_bytes_read + bytes_read >= MAX_COUNT.unwrap() {
+                MAX_COUNT.unwrap() - total_bytes_read
+            } else {
+                bytes_read
+            };
 
         let addr = addr_line(current_addr, trailing_zeroes, *USE_COLOR);
         let hex = hex_line(&buffer, bytes_read, *USE_COLOR);
@@ -161,6 +196,7 @@ fn read_binary_file() -> io::Result<()> {
         };
 
         current_addr += bytes_read;
+        total_bytes_read += bytes_read;
     }
 
     if let Some(w) = &mut writer {
