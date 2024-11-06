@@ -74,11 +74,24 @@ const SPLIT_SYMBOL: &str = "┃";
 
 fn get_color(byte: u8) -> Color {
     match byte {
-        0 => Color::White,
+        0 => Color::BrightBlack,
         9 | 10 | 13 | 32 => Color::Blue,
         32..=126 => Color::Green,
         128..=255 => Color::Yellow,
         _ => Color::Red,
+    }
+}
+
+fn get_ascii(byte: u8) -> String {
+    match byte {
+        0 => "•".to_string(),
+        9 => "⇥".to_string(),
+        10 => "↵".to_string(),
+        13 => "␍".to_string(),
+        32 => "␣".to_string(),
+        32..=126 => (byte as char).to_string(),
+        128..=255 => "✖".to_string(),
+        _ => "▴".to_string(),
     }
 }
 
@@ -109,7 +122,15 @@ fn hex_side(buff: &Vec<u8>, bytes_read: usize, use_color: bool) -> String {
 }
 
 fn ascii_side(buff: &Vec<u8>, bytes_read: usize, use_color: bool) -> String {
-    "ascii work in progress".to_string()
+    buff.into_iter()
+        .map(|x| {
+            let mut y = get_ascii(*x);
+            // if use_color {
+            y = y.color(get_color(*x)).to_string();
+            // }
+            y + " "
+        })
+        .collect()
 }
 
 fn read_binary_file() -> io::Result<()> {
