@@ -2,41 +2,16 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write},
     path::PathBuf,
-    str::FromStr,
 };
 
+use byte_range::ByteRange;
 use clap::Parser;
 use colored::{Color, Colorize};
 use lazy_static::lazy_static;
+use util::ApplyIf;
 
-#[derive(Debug, Clone, Default)]
-struct ByteRange {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl FromStr for ByteRange {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() != 2 {
-            return Err("Range must be in the format 'start-end'");
-        }
-
-        let start = usize::from_str_radix(parts[0].trim_start_matches("0x"), 16)
-            .or_else(|_| usize::from_str(parts[0]));
-        let end = usize::from_str_radix(parts[1].trim_start_matches("0x"), 16)
-            .or_else(|_| usize::from_str(parts[1]));
-
-        let (start, end) = match (start, end) {
-            (Ok(s), Ok(e)) => (s, e),
-            _ => return Err("Range entries must either be in the format '0xFF' or '255'"),
-        };
-
-        Ok(ByteRange { start, end })
-    }
-}
+mod byte_range;
+mod util;
 
 #[derive(Parser, Debug)]
 #[clap(name = "hex-thing", about = "A custom hex dump tool", version = "1.0")]
@@ -68,17 +43,21 @@ struct Args {
 
 lazy_static! {
     static ref ARGS: Args = Args::parse();
+    static ref USE_COLOR: bool = ARGS.output.is_none();
+    static ref RAW_SPLIT_SYMBOL: &'static str = "│";
+    static ref SPLIT_SYMBOL: String = match *USE_COLOR {
+        true => RAW_SPLIT_SYMBOL.color(Color::BrightBlack).to_string(),
+        false => RAW_SPLIT_SYMBOL.to_string(),
+    };
 }
-
-const SPLIT_SYMBOL: &str = "┃";
 
 fn get_color(byte: u8) -> Color {
     match byte {
         0 => Color::BrightBlack,
-        9 | 10 | 13 | 32 => Color::Blue,
+        9 | 10 | 13 | 32 => Color::Cyan,
         32..=126 => Color::Green,
         128..=255 => Color::Yellow,
-        _ => Color::Red,
+        _ => Color::BrightRed,
     }
 }
 
@@ -95,83 +74,97 @@ fn get_ascii(byte: u8) -> String {
     }
 }
 
-fn addr_side(addr: usize, trailing_zeroes: usize) -> String {
+fn addr_line(addr: usize, trailing_zeroes: usize, use_color: bool) -> String {
     match ARGS.uppercase {
-        true => format!("0x{:0width$X}:", addr, width = trailing_zeroes),
-        false => format!("0x{:0width$x}:", addr, width = trailing_zeroes),
+        true => format!("0x{:0width$X}", addr, width = trailing_zeroes),
+        false => format!("0x{:0width$x}", addr, width = trailing_zeroes),
     }
+    .apply_if(use_color, |x| x.color(Color::BrightBlack).to_string())
 }
 
-fn hex_side(buff: &Vec<u8>, bytes_read: usize, use_color: bool) -> String {
-    let hex_string = hex::encode(buff);
-
-    let spaced_hex = hex_string.as_bytes().chunks(2).map(std::str::from_utf8);
-    let spaced_hex = if use_color {
-        spaced_hex
-            .map(|x| x.unwrap().to_string())
-            .collect::<Vec<String>>()
-    } else {
-        spaced_hex
-            .enumerate()
-            .map(|(i, x)| x.unwrap().color(get_color(buff[i])).to_string())
-            .collect::<Vec<String>>()
-    };
-    let spaced_hex = spaced_hex.join(" ");
-
-    spaced_hex
+fn hex_line(buff: &[u8], bytes_read: usize, use_color: bool) -> String {
+    hex::encode(buff)
+        .as_bytes()
+        .chunks(2)
+        .take(bytes_read)
+        .map(std::str::from_utf8)
+        .enumerate()
+        .map(|(index, byte)| {
+            byte.unwrap()
+                .to_string()
+                .apply_if(use_color, |byte_string| {
+                    byte_string.color(get_color(buff[index])).to_string()
+                })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn ascii_side(buff: &Vec<u8>, bytes_read: usize, use_color: bool) -> String {
+fn ascii_line(buff: &[u8], bytes_read: usize, use_color: bool) -> String {
     buff.into_iter()
-        .map(|x| {
-            let mut y = get_ascii(*x);
-            // if use_color {
-            y = y.color(get_color(*x)).to_string();
-            // }
-            y + " "
+        .take(bytes_read)
+        .map(|&byte| {
+            get_ascii(byte).apply_if(use_color, |byte_string| {
+                byte_string.color(get_color(byte)).to_string()
+            })
         })
         .collect()
 }
 
 fn read_binary_file() -> io::Result<()> {
-    let file = File::open(ARGS.input.clone())?;
-    let file_size = file.metadata()?.len();
-    let trailing_zeroes = (file_size as f64).log(16.0).ceil() as usize;
+    let ifile = File::open(ARGS.input.clone())?;
+    let ifile_size = ifile.metadata()?.len();
+
+    let trailing_zeroes = (ifile_size as f64).log(16.0).ceil() as usize;
     let start_point = ARGS.byte_range.clone().unwrap_or_default().start as u64;
 
-    let mut reader = BufReader::new(file);
-
+    let mut reader = BufReader::new(ifile);
     reader.seek(io::SeekFrom::Start(start_point))?;
 
-    let buffer_size = ARGS.bytes_per_line; // Size of each buffer read
-    let mut buffer = vec![0u8; buffer_size]; // Create a buffer to hold the data
+    let buffer_size = ARGS.bytes_per_line;
+    let mut buffer = vec![0u8; buffer_size];
 
     let mut current_addr = start_point as usize;
 
+    let mut writer = match ARGS.output.clone() {
+        Some(of_name) => Some(BufWriter::new(File::create_new(of_name)?)),
+        None => None,
+    };
+
     loop {
-        // Read into the buffer
         let bytes_read = reader.read(&mut buffer)?;
+
         if bytes_read == 0 {
-            break; // End of file
+            // End of file
+            break;
         }
         if ARGS.byte_range.is_some() && current_addr > ARGS.byte_range.clone().unwrap().end {
-            break; // Out of range
+            // Out of range
+            break;
         }
 
-        let addr = addr_side(current_addr, trailing_zeroes);
-        let hex = hex_side(&buffer, bytes_read, ARGS.output.is_some());
-        let ascii = ascii_side(&buffer, bytes_read, ARGS.output.is_some());
+        let addr = addr_line(current_addr, trailing_zeroes, *USE_COLOR);
+        let hex = hex_line(&buffer, bytes_read, *USE_COLOR);
+        let ascii = ascii_line(&buffer, bytes_read, *USE_COLOR);
 
-        if ARGS.output.is_none() {
-            println!(
-                "{} {} {} {} {}",
-                addr, SPLIT_SYMBOL, hex, SPLIT_SYMBOL, ascii
-            )
-        } else {
-            unimplemented!("No writing to file yet");
-        }
+        let extra_space = " ".repeat((ARGS.bytes_per_line - bytes_read) * 3);
+
+        let output = format!(
+            " {} {} {}{} {} {}\n",
+            addr, *SPLIT_SYMBOL, hex, extra_space, *SPLIT_SYMBOL, ascii
+        );
+        match &mut writer {
+            Some(w) => w.write_all(output.as_bytes())?,
+            None => {
+                print!("{output}");
+            }
+        };
 
         current_addr += bytes_read;
+    }
+
+    if let Some(w) = &mut writer {
+        w.flush()?;
     }
 
     Ok(())
@@ -185,7 +178,7 @@ fn reverse_operation() -> io::Result<()> {
 
     for (index, line) in reader.lines().enumerate() {
         let line = line?;
-        let parts: Vec<&str> = line.trim().split(SPLIT_SYMBOL).collect();
+        let parts: Vec<&str> = line.trim().split(*RAW_SPLIT_SYMBOL).collect();
 
         let hex_str = match parts.len() {
             1 => parts[0],
@@ -225,17 +218,10 @@ fn reverse_operation() -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    if ARGS.reverse && ARGS.output.is_none() {
-        eprintln!("Error: -r (reverse) option requires -o (output) to be specified.");
-        std::process::exit(1);
-    }
-
-    if ARGS.reverse {
-        println!("reversing!");
-        reverse_operation()?;
-    } else {
-        read_binary_file()?;
-    }
+    match ARGS.reverse {
+        true => reverse_operation()?,
+        false => read_binary_file()?,
+    };
 
     Ok(())
 }
