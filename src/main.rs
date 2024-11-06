@@ -8,7 +8,7 @@ use byte_range::ByteRange;
 use clap::Parser;
 use colored::{Color, Colorize};
 use lazy_static::lazy_static;
-use util::ApplyIf;
+use util::{parse_num, ApplyIf};
 
 mod byte_range;
 mod util;
@@ -25,15 +25,15 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Number of bytes per line
-    #[clap(short = 'l', long, default_value = "16")]
+    #[clap(short = 'l', long, default_value = "16", value_parser = parse_num)]
     bytes_per_line: usize,
 
     /// Skip the N first bytes of the file
-    #[clap(short, long, value_name = "N")]
+    #[clap(short, long, value_name = "N", value_parser = parse_num)]
     skip: Option<usize>,
 
     /// Only read N bytes from input
-    #[clap(short = 'n', long, value_name = "N")]
+    #[clap(short = 'n', long, value_name = "N", value_parser = parse_num)]
     length: Option<usize>,
 
     /// Byte range to read (e.g., 0-1000 or 0xff-0x3e7)
