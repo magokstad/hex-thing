@@ -14,5 +14,5 @@ cd hex-thing
 # show how to use the cli tool
 cargo run -- --help
 # sample usage
-cargo run -- ./binfile -b 0x0000-0x0FFF
+cargo run -- ./binfile -n 0x0FFF
 ```
