@@ -1,5 +1,7 @@
 # hex-thing (name wip)
 
+![Showcase](res/example.png)
+
 A hexdump tool written in Rust
 
 This was made in roughly 4 hours, things are still WIP
