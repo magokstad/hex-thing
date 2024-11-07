@@ -253,11 +253,12 @@ fn reverse_operation() -> io::Result<()> {
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    match ARGS.reverse {
-        true => reverse_operation()?,
-        false => read_binary_file()?,
-    };
-
-    Ok(())
+fn main() {
+    if let Err(e) = match ARGS.reverse {
+        true => reverse_operation(),
+        false => read_binary_file(),
+    } {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
 }
